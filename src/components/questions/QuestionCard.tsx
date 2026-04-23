@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import type { Question, Answer } from '../../types';
 import { checkFormula, checkName } from '../../utils/normalize';
 import ListingQuestion from './ListingQuestion';
@@ -20,19 +20,41 @@ export default function QuestionCard({ question, onAnswered, onNext, questionNum
   const [isCorrect, setIsCorrect] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  // Guard: ensures onNext is called at most once per question, even if
+  // the 800ms auto-advance timer AND a button click happen to overlap.
+  const nextFiredRef = useRef(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Reset everything when the question changes
   useEffect(() => {
-    setInput(''); setSelected(null); setSubmitted(false); setIsCorrect(false);
-    setTimeout(() => inputRef.current?.focus(), 50);
+    setInput('');
+    setSelected(null);
+    setSubmitted(false);
+    setIsCorrect(false);
+    nextFiredRef.current = false;
+    if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
+    setTimeout(() => inputRef.current?.focus(), 40);
   }, [question.id]);
 
+  // Cleanup timer on unmount
+  useEffect(() => () => { if (timerRef.current) clearTimeout(timerRef.current); }, []);
+
+  const safeNext = useCallback(() => {
+    if (nextFiredRef.current) return;
+    nextFiredRef.current = true;
+    if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
+    onNext();
+  }, [onNext]);
+
+  // Global keyboard: Escape to go home, ArrowRight to advance after answered
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') { window.location.href = '/'; return; }
-      if (submitted && (e.key === 'Enter' || e.key === 'ArrowRight')) onNext();
+      if (e.key === 'ArrowRight' && submitted) safeNext();
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [submitted, onNext]);
+  }, [submitted, safeNext]);
 
   // ── Text-input submit ──────────────────────────────────────────────────────
   const submitText = () => {
@@ -44,7 +66,10 @@ export default function QuestionCard({ question, onAnswered, onNext, questionNum
     setIsCorrect(correct);
     setSubmitted(true);
     onAnswered(ans);
-    if (correct) setTimeout(onNext, 800);
+    if (correct) {
+      // Auto-advance on correct; safeNext guard prevents double-fire
+      timerRef.current = setTimeout(safeNext, 800);
+    }
   };
 
   // ── Option-button submit ───────────────────────────────────────────────────
@@ -55,7 +80,9 @@ export default function QuestionCard({ question, onAnswered, onNext, questionNum
     setIsCorrect(correct);
     setSubmitted(true);
     onAnswered({ questionId: question.id, userAnswer: opt, correct });
-    if (correct) setTimeout(onNext, 700);
+    if (correct) {
+      timerRef.current = setTimeout(safeNext, 700);
+    }
   };
 
   // ── Listing submit ─────────────────────────────────────────────────────────
@@ -74,18 +101,18 @@ export default function QuestionCard({ question, onAnswered, onNext, questionNum
     return `${base} border-gray-200 bg-gray-50 text-gray-400`;
   };
 
-  const inputContainerClass = () => {
+  const inputBorderClass = () => {
     if (!submitted) return 'border-gray-300 focus-within:border-blue-500';
     return isCorrect ? 'border-green-500 bg-green-50' : 'border-red-400 bg-red-50';
   };
 
   const { type, prompt, options, correctAnswer } = question;
-  const isText = type === 'name-to-formula' || type === 'formula-to-name';
+  const isText  = type === 'name-to-formula' || type === 'formula-to-name';
   const isCharge = type === 'charge-select' || type === 'fill-charge';
-  const isTF = type === 'true-false-charge' || type === 'true-false-formula';
+  const isTF     = type === 'true-false-charge' || type === 'true-false-formula';
   const isOxygen = type === 'oxygen-count';
-  const isMCQ = type === 'mcq-formula' || type === 'mcq-name' || type === 'odd-one-out' ||
-                type === 'cation-or-anion' || type === 'mono-or-poly';
+  const isMCQ    = type === 'mcq-formula' || type === 'mcq-name' || type === 'odd-one-out' ||
+                   type === 'cation-or-anion' || type === 'mono-or-poly';
 
   return (
     <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6 space-y-5">
@@ -102,15 +129,15 @@ export default function QuestionCard({ question, onAnswered, onNext, questionNum
       {/* Prompt */}
       <p className="text-lg font-semibold text-slate-800 leading-snug">{prompt}</p>
 
-      {/* ── Text input ─────────────────────────────────────────────────────── */}
+      {/* ── Text input ──────────────────────────────────────────────────────── */}
       {isText && (
         <div className="space-y-3">
-          <div className={`flex rounded-lg border-2 overflow-hidden transition-colors ${inputContainerClass()}`}>
+          <div className={`flex rounded-lg border-2 overflow-hidden transition-colors ${inputBorderClass()}`}>
             <input
               ref={inputRef}
               value={input}
               onChange={e => setInput(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && (submitted ? onNext() : submitText())}
+              onKeyDown={e => { if (e.key === 'Enter' && !submitted) submitText(); }}
               disabled={submitted}
               placeholder={type === 'name-to-formula' ? 'Type formula…' : 'Type name…'}
               className="flex-1 px-4 py-3 text-base bg-transparent outline-none text-slate-800 placeholder-gray-400"
@@ -128,18 +155,18 @@ export default function QuestionCard({ question, onAnswered, onNext, questionNum
           {submitted && !isCorrect && (
             <div className="flex items-start gap-2 text-sm bg-red-50 border border-red-200 rounded-lg px-3 py-2">
               <span className="text-red-500 mt-0.5">✗</span>
-              <span className="text-gray-700">Correct answer: <strong className="text-slate-800">{correctAnswer as string}</strong></span>
+              <span className="text-gray-700">
+                Correct answer: <strong className="text-slate-800">{correctAnswer as string}</strong>
+              </span>
             </div>
           )}
           {submitted && isCorrect && (
-            <p className="text-sm text-green-700 flex items-center gap-1">
-              <span>✓</span> Correct!
-            </p>
+            <p className="text-sm text-green-700 flex items-center gap-1">✓ Correct!</p>
           )}
         </div>
       )}
 
-      {/* ── Charge buttons ─────────────────────────────────────────────────── */}
+      {/* ── Charge buttons ──────────────────────────────────────────────────── */}
       {isCharge && (
         <div className="space-y-3">
           <div className="flex flex-wrap gap-2">
@@ -157,7 +184,7 @@ export default function QuestionCard({ question, onAnswered, onNext, questionNum
         </div>
       )}
 
-      {/* ── True / False ───────────────────────────────────────────────────── */}
+      {/* ── True / False ────────────────────────────────────────────────────── */}
       {isTF && (
         <div className="space-y-3">
           <div className="flex gap-3">
@@ -175,7 +202,7 @@ export default function QuestionCard({ question, onAnswered, onNext, questionNum
         </div>
       )}
 
-      {/* ── MCQ (formula / name / odd-one-out / category) ─────────────────── */}
+      {/* ── MCQ + oxygen-count ──────────────────────────────────────────────── */}
       {(isMCQ || isOxygen) && options && (
         <div className="space-y-3">
           <div className="grid grid-cols-2 gap-3">
@@ -193,23 +220,23 @@ export default function QuestionCard({ question, onAnswered, onNext, questionNum
         </div>
       )}
 
-      {/* ── Listing ────────────────────────────────────────────────────────── */}
+      {/* ── Listing ─────────────────────────────────────────────────────────── */}
       {type === 'listing' && (
         <ListingQuestion question={question} onAnswer={handleListingAnswer} />
       )}
 
-      {/* ── Next button (shown after submission on wrong answers) ────────── */}
+      {/* ── Next button (wrong answers + listing) ───────────────────────────── */}
       {submitted && !isCorrect && type !== 'listing' && (
         <button
-          onClick={onNext}
+          onClick={safeNext}
           className="w-full py-3 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 transition-colors"
         >
-          Next →
+          Next → <span className="text-blue-200 text-xs ml-1">(or →)</span>
         </button>
       )}
       {submitted && type === 'listing' && (
         <button
-          onClick={onNext}
+          onClick={safeNext}
           className="w-full py-3 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 transition-colors"
         >
           Next Question →

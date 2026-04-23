@@ -25,21 +25,31 @@ export default function FlashcardPhase({ phaseKey, direction }: Props) {
   const [inputVal, setInputVal] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
 
+  // Guard against double-advance (e.g. 800ms timer + button click overlapping)
+  const advanceFiredRef = useRef(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const groups = FLASHCARD_GROUPS;
   const currentGroup = groups[groupIdx];
   const ion = currentGroup?.ions[cardIdx];
   const totalCards = currentGroup?.ions.length ?? 0;
 
-  const prompt = direction === 'name-to-formula' ? ion?.name : ion?.symbol;
-  const correctAnswer = direction === 'name-to-formula' ? ion?.symbol : ion?.name;
-  const inputPlaceholder = direction === 'name-to-formula' ? 'Type formula…' : 'Type name…';
-  const phaseTitle = direction === 'name-to-formula' ? 'Phase 1 — Name → Formula' : 'Phase 2 — Formula → Name';
+  const isFormula = direction === 'name-to-formula';
+  const prompt = isFormula ? ion?.name : ion?.symbol;
+  const correctAnswer = isFormula ? ion?.symbol : ion?.name;
+  const inputPlaceholder = isFormula ? 'Type formula…' : 'Type name…';
+  const phaseTitle = isFormula ? 'Phase 1 — Name → Formula' : 'Phase 2 — Formula → Name';
 
+  // Reset guard and focus input whenever the card changes
   useEffect(() => {
-    setTimeout(() => inputRef.current?.focus(), 50);
+    advanceFiredRef.current = false;
+    if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
+    setTimeout(() => inputRef.current?.focus(), 40);
   }, [groupIdx, cardIdx]);
 
-  // Save progress
+  // Cleanup timer on unmount
+  useEffect(() => () => { if (timerRef.current) clearTimeout(timerRef.current); }, []);
+
   const saveProgress = useCallback((gi: number, ci: number, completedGroups: number[]) => {
     update({
       [phaseKey]: {
@@ -52,6 +62,10 @@ export default function FlashcardPhase({ phaseKey, direction }: Props) {
   }, [phaseKey, phaseState, update]);
 
   const advance = useCallback(() => {
+    if (advanceFiredRef.current) return;
+    advanceFiredRef.current = true;
+    if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
+
     const nextCard = cardIdx + 1;
     if (nextCard < totalCards) {
       setCardIdx(nextCard);
@@ -59,7 +73,6 @@ export default function FlashcardPhase({ phaseKey, direction }: Props) {
       setInputVal('');
       saveProgress(groupIdx, nextCard, phaseState.completedGroups);
     } else {
-      // Group done
       const completedGroups = phaseState.completedGroups.includes(groupIdx)
         ? phaseState.completedGroups
         : [...phaseState.completedGroups, groupIdx];
@@ -71,29 +84,25 @@ export default function FlashcardPhase({ phaseKey, direction }: Props) {
         setInputVal('');
         saveProgress(nextGroup, 0, completedGroups);
       } else {
-        // Phase complete
-        update({
-          [phaseKey]: {
-            ...phaseState,
-            completed: true,
-            completedGroups,
-          },
-        });
+        update({ [phaseKey]: { ...phaseState, completed: true, completedGroups } });
         navigate('/');
       }
     }
   }, [cardIdx, totalCards, groupIdx, groups.length, phaseState, saveProgress, update, phaseKey, navigate]);
 
-  const submitAnswer = () => {
+  const submitAnswer = useCallback(() => {
     if (cardState !== 'idle' || !inputVal.trim()) return;
-    const correct = direction === 'name-to-formula'
+    const correct = isFormula
       ? checkFormula(inputVal, correctAnswer!)
       : checkName(inputVal, correctAnswer!);
     setCardState(correct ? 'correct' : 'wrong');
-    if (correct) setTimeout(advance, 800);
-  };
+    if (correct) {
+      timerRef.current = setTimeout(advance, 800);
+    }
+  }, [cardState, inputVal, isFormula, correctAnswer, advance]);
 
-  // Keyboard
+  // Keyboard: Enter submits when idle; Enter or → advances when wrong
+  // Use cardState + submitAnswer + advance in deps so closure is always fresh
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') { navigate('/'); return; }
@@ -101,15 +110,15 @@ export default function FlashcardPhase({ phaseKey, direction }: Props) {
         if (cardState === 'idle') submitAnswer();
         else if (cardState === 'wrong') advance();
       }
-      if (e.key === 'ArrowRight' && cardState !== 'idle') advance();
+      if (e.key === 'ArrowRight' && cardState === 'wrong') advance();
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  });
+  }, [cardState, submitAnswer, advance, navigate]); // ← proper deps, not empty/no-array
 
   const navigateToGroup = (gi: number) => {
     if (gi === groupIdx) return;
-    if (!phaseState.completedGroups.includes(gi) && gi !== groupIdx) return;
+    if (!phaseState.completedGroups.includes(gi)) return;
     setGroupIdx(gi);
     setCardIdx(0);
     setCardState('idle');
@@ -119,42 +128,41 @@ export default function FlashcardPhase({ phaseKey, direction }: Props) {
 
   if (!ion) return null;
 
-  const containerClass = cardState === 'idle'
-    ? 'border-gray-200'
-    : cardState === 'correct'
-    ? 'border-green-500 bg-green-50'
-    : 'border-red-400 bg-red-50';
+  const cardBorder =
+    cardState === 'idle'    ? 'border-gray-200' :
+    cardState === 'correct' ? 'border-green-500 bg-green-50' :
+                              'border-red-400 bg-red-50';
+
+  const inputBorder =
+    cardState === 'idle'    ? 'border-gray-300' :
+    cardState === 'correct' ? 'border-green-500' :
+                              'border-red-400';
 
   return (
     <Layout>
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
-        <button onClick={() => navigate('/')} className="text-gray-400 hover:text-gray-600 text-sm flex items-center gap-1">
+        <button onClick={() => navigate('/')} className="text-gray-400 hover:text-gray-600 text-sm">
           ← Home
         </button>
         <h1 className="text-sm font-bold text-slate-600 uppercase tracking-wide">{phaseTitle}</h1>
-        <span className="text-sm text-gray-400">
-          Group {groupIdx + 1}/{groups.length}
-        </span>
+        <span className="text-sm text-gray-400">Group {groupIdx + 1}/{groups.length}</span>
       </div>
 
       {/* Group navigation pills */}
       <div className="flex flex-wrap gap-2 mb-5">
         {groups.map((g, gi) => {
-          const isDone = phaseState.completedGroups.includes(gi);
+          const isDone    = phaseState.completedGroups.includes(gi);
           const isCurrent = gi === groupIdx;
-          const canClick = isDone || isCurrent;
           return (
             <button
               key={gi}
               onClick={() => navigateToGroup(gi)}
-              disabled={!canClick}
+              disabled={!isDone && !isCurrent}
               className={`text-xs font-semibold px-3 py-1 rounded-full border transition-colors ${
-                isCurrent
-                  ? 'bg-blue-600 text-white border-blue-600'
-                  : isDone
-                  ? 'bg-green-100 text-green-700 border-green-300 hover:bg-green-200'
-                  : 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'
+                isCurrent ? 'bg-blue-600 text-white border-blue-600'
+                : isDone  ? 'bg-green-100 text-green-700 border-green-300 hover:bg-green-200'
+                          : 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'
               }`}
             >
               {isDone && !isCurrent ? '✓ ' : ''}{g.label}
@@ -166,31 +174,33 @@ export default function FlashcardPhase({ phaseKey, direction }: Props) {
       {/* Progress bar */}
       <div className="mb-6">
         <ProgressBar
-          value={(cardIdx) / totalCards}
+          value={cardIdx / totalCards}
           label={`${currentGroup.label} — Card ${cardIdx + 1} of ${totalCards}`}
         />
       </div>
 
       {/* Flashcard */}
-      <div className={`bg-white rounded-2xl border-2 shadow-sm p-8 text-center transition-colors duration-200 ${containerClass}`}>
+      <div className={`bg-white rounded-2xl border-2 shadow-sm p-8 text-center transition-colors duration-200 ${cardBorder}`}>
         <p className="text-xs uppercase tracking-widest text-gray-400 mb-3">
-          {direction === 'name-to-formula' ? 'Ion Name' : 'Ion Formula'}
+          {isFormula ? 'Ion Name' : 'Ion Formula'}
         </p>
         <div className="text-4xl font-bold text-slate-800 mb-8 min-h-[3rem] flex items-center justify-center">
           {prompt}
         </div>
 
         <div className="max-w-xs mx-auto space-y-3">
-          <div className={`flex rounded-xl border-2 overflow-hidden transition-colors ${
-            cardState === 'idle' ? 'border-gray-300' : cardState === 'correct' ? 'border-green-500' : 'border-red-400'
-          }`}>
+          <div className={`flex rounded-xl border-2 overflow-hidden transition-colors ${inputBorder}`}>
             <input
               ref={inputRef}
               value={inputVal}
               onChange={e => setInputVal(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter' && cardState === 'idle') submitAnswer(); }}
               disabled={cardState !== 'idle'}
               placeholder={inputPlaceholder}
               className="flex-1 px-4 py-3 text-base bg-transparent outline-none text-slate-800 placeholder-gray-400 text-center"
+              spellCheck={false}
+              autoComplete="off"
+              autoCorrect="off"
             />
             {cardState === 'idle' && (
               <button
@@ -216,14 +226,13 @@ export default function FlashcardPhase({ phaseKey, direction }: Props) {
                 onClick={advance}
                 className="w-full py-2.5 bg-slate-700 text-white font-semibold rounded-lg hover:bg-slate-800 text-sm transition-colors"
               >
-                Next → (Enter)
+                Next → <span className="text-slate-400 text-xs ml-1">(Enter or →)</span>
               </button>
             </div>
           )}
         </div>
       </div>
 
-      {/* Keyboard hint */}
       <p className="text-center text-xs text-gray-400 mt-4">
         Enter to check · Esc for Home
       </p>
