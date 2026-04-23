@@ -20,41 +20,42 @@ export default function QuestionCard({ question, onAnswered, onNext, questionNum
   const [isCorrect, setIsCorrect] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // Guard: ensures onNext is called at most once per question, even if
-  // the 800ms auto-advance timer AND a button click happen to overlap.
-  const nextFiredRef = useRef(false);
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Guard: safeNext fires onNext exactly once per question
+  const firedRef   = useRef(false);
+  const timerRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Stable ref so the global keydown handler always reads the latest submitted state
+  const submittedRef = useRef(false);
+  submittedRef.current = submitted;
 
-  // Reset everything when the question changes
   useEffect(() => {
     setInput('');
     setSelected(null);
     setSubmitted(false);
     setIsCorrect(false);
-    nextFiredRef.current = false;
+    firedRef.current = false;
     if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
     setTimeout(() => inputRef.current?.focus(), 40);
   }, [question.id]);
 
-  // Cleanup timer on unmount
   useEffect(() => () => { if (timerRef.current) clearTimeout(timerRef.current); }, []);
 
   const safeNext = useCallback(() => {
-    if (nextFiredRef.current) return;
-    nextFiredRef.current = true;
+    if (firedRef.current) return;
+    firedRef.current = true;
     if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
     onNext();
   }, [onNext]);
 
-  // Global keyboard: Escape to go home, ArrowRight to advance after answered
+  // Global handler: Escape only + ArrowRight to advance after submission.
+  // Uses refs so it never needs to be re-registered when state changes.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') { window.location.href = '/'; return; }
-      if (e.key === 'ArrowRight' && submitted) safeNext();
+      if (e.key === 'ArrowRight' && submittedRef.current) safeNext();
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [submitted, safeNext]);
+  }, [safeNext]); // only re-register when safeNext identity changes (i.e. when question changes)
 
   // ── Text-input submit ──────────────────────────────────────────────────────
   const submitText = () => {
@@ -62,12 +63,10 @@ export default function QuestionCard({ question, onAnswered, onNext, questionNum
     const correct = question.type === 'name-to-formula'
       ? checkFormula(input, question.correctAnswer as string)
       : checkName(input, question.correctAnswer as string);
-    const ans: Answer = { questionId: question.id, userAnswer: input, correct };
     setIsCorrect(correct);
     setSubmitted(true);
-    onAnswered(ans);
+    onAnswered({ questionId: question.id, userAnswer: input, correct });
     if (correct) {
-      // Auto-advance on correct; safeNext guard prevents double-fire
       timerRef.current = setTimeout(safeNext, 800);
     }
   };
@@ -91,10 +90,11 @@ export default function QuestionCard({ question, onAnswered, onNext, questionNum
     onAnswered({ questionId: question.id, userAnswer: answer, correct, partialScore: score });
   };
 
-  // ── Helpers ────────────────────────────────────────────────────────────────
+  // ── Style helpers ──────────────────────────────────────────────────────────
   const optionClass = (opt: string) => {
     const base = 'px-4 py-3 rounded-lg border-2 text-sm font-semibold transition-all text-left';
-    if (!submitted) return `${base} border-gray-200 hover:border-blue-500 hover:bg-blue-50 bg-white cursor-pointer`;
+    if (!submitted)
+      return `${base} border-gray-200 hover:border-blue-500 hover:bg-blue-50 bg-white cursor-pointer`;
     const ca = question.correctAnswer as string;
     if (opt === ca) return `${base} border-green-500 bg-green-100 text-green-800`;
     if (opt === selected && opt !== ca) return `${base} border-red-400 bg-red-100 text-red-800`;
@@ -107,7 +107,7 @@ export default function QuestionCard({ question, onAnswered, onNext, questionNum
   };
 
   const { type, prompt, options, correctAnswer } = question;
-  const isText  = type === 'name-to-formula' || type === 'formula-to-name';
+  const isText   = type === 'name-to-formula' || type === 'formula-to-name';
   const isCharge = type === 'charge-select' || type === 'fill-charge';
   const isTF     = type === 'true-false-charge' || type === 'true-false-formula';
   const isOxygen = type === 'oxygen-count';
@@ -137,13 +137,23 @@ export default function QuestionCard({ question, onAnswered, onNext, questionNum
               ref={inputRef}
               value={input}
               onChange={e => setInput(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter' && !submitted) submitText(); }}
+              onKeyDown={e => {
+                // Only fire submitText here; stopPropagation keeps the
+                // window handler from seeing the same Enter key press.
+                if (e.key === 'Enter' && !submitted) {
+                  e.stopPropagation();
+                  submitText();
+                }
+              }}
               disabled={submitted}
               placeholder={type === 'name-to-formula' ? 'Type formula…' : 'Type name…'}
               className="flex-1 px-4 py-3 text-base bg-transparent outline-none text-slate-800 placeholder-gray-400"
+              spellCheck={false}
+              autoComplete="off"
             />
             {!submitted && (
               <button
+                type="button"
                 onClick={submitText}
                 disabled={!input.trim()}
                 className="px-4 bg-blue-600 text-white font-semibold hover:bg-blue-700 disabled:opacity-40 transition-colors"
@@ -171,7 +181,7 @@ export default function QuestionCard({ question, onAnswered, onNext, questionNum
         <div className="space-y-3">
           <div className="flex flex-wrap gap-2">
             {CHARGES.map(c => (
-              <button key={c} onClick={() => submitOption(c)} className={optionClass(c)}>
+              <button type="button" key={c} onClick={() => submitOption(c)} className={optionClass(c)}>
                 {c}
               </button>
             ))}
@@ -189,7 +199,7 @@ export default function QuestionCard({ question, onAnswered, onNext, questionNum
         <div className="space-y-3">
           <div className="flex gap-3">
             {['True', 'False'].map(opt => (
-              <button key={opt} onClick={() => submitOption(opt)} className={`flex-1 ${optionClass(opt)}`}>
+              <button type="button" key={opt} onClick={() => submitOption(opt)} className={`flex-1 ${optionClass(opt)}`}>
                 {opt}
               </button>
             ))}
@@ -207,7 +217,7 @@ export default function QuestionCard({ question, onAnswered, onNext, questionNum
         <div className="space-y-3">
           <div className="grid grid-cols-2 gap-3">
             {options.map(opt => (
-              <button key={opt} onClick={() => submitOption(opt)} className={optionClass(opt)}>
+              <button type="button" key={opt} onClick={() => submitOption(opt)} className={optionClass(opt)}>
                 {opt}
               </button>
             ))}
@@ -228,6 +238,7 @@ export default function QuestionCard({ question, onAnswered, onNext, questionNum
       {/* ── Next button (wrong answers + listing) ───────────────────────────── */}
       {submitted && !isCorrect && type !== 'listing' && (
         <button
+          type="button"
           onClick={safeNext}
           className="w-full py-3 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 transition-colors"
         >
@@ -236,6 +247,7 @@ export default function QuestionCard({ question, onAnswered, onNext, questionNum
       )}
       {submitted && type === 'listing' && (
         <button
+          type="button"
           onClick={safeNext}
           className="w-full py-3 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 transition-colors"
         >

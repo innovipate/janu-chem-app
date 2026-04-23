@@ -25,9 +25,15 @@ export default function FlashcardPhase({ phaseKey, direction }: Props) {
   const [inputVal, setInputVal] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // Guard against double-advance (e.g. 800ms timer + button click overlapping)
-  const advanceFiredRef = useRef(false);
+  // Prevent double-advance (e.g. timer fires and user also clicks Next)
+  const advancedRef = useRef(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Stable refs so callbacks never become stale while still reading latest state
+  const cardStateRef = useRef<CardState>('idle');
+  cardStateRef.current = cardState;
+  const inputValRef = useRef('');
+  inputValRef.current = inputVal;
 
   const groups = FLASHCARD_GROUPS;
   const currentGroup = groups[groupIdx];
@@ -37,40 +43,32 @@ export default function FlashcardPhase({ phaseKey, direction }: Props) {
   const isFormula = direction === 'name-to-formula';
   const prompt = isFormula ? ion?.name : ion?.symbol;
   const correctAnswer = isFormula ? ion?.symbol : ion?.name;
-  const inputPlaceholder = isFormula ? 'Type formula…' : 'Type name…';
-  const phaseTitle = isFormula ? 'Phase 1 — Name → Formula' : 'Phase 2 — Formula → Name';
 
-  // Reset guard and focus input whenever the card changes
   useEffect(() => {
-    advanceFiredRef.current = false;
+    advancedRef.current = false;
     if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
+    setCardState('idle');
+    setInputVal('');
     setTimeout(() => inputRef.current?.focus(), 40);
   }, [groupIdx, cardIdx]);
 
-  // Cleanup timer on unmount
   useEffect(() => () => { if (timerRef.current) clearTimeout(timerRef.current); }, []);
 
   const saveProgress = useCallback((gi: number, ci: number, completedGroups: number[]) => {
     update({
-      [phaseKey]: {
-        ...phaseState,
-        currentGroupIndex: gi,
-        currentCardIndex: ci,
-        completedGroups,
-      },
+      [phaseKey]: { ...phaseState, currentGroupIndex: gi, currentCardIndex: ci, completedGroups },
     });
   }, [phaseKey, phaseState, update]);
 
+  // advance() is stable during a card's lifetime; guard prevents double-fire
   const advance = useCallback(() => {
-    if (advanceFiredRef.current) return;
-    advanceFiredRef.current = true;
+    if (advancedRef.current) return;
+    advancedRef.current = true;
     if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
 
     const nextCard = cardIdx + 1;
     if (nextCard < totalCards) {
       setCardIdx(nextCard);
-      setCardState('idle');
-      setInputVal('');
       saveProgress(groupIdx, nextCard, phaseState.completedGroups);
     } else {
       const completedGroups = phaseState.completedGroups.includes(groupIdx)
@@ -80,8 +78,6 @@ export default function FlashcardPhase({ phaseKey, direction }: Props) {
       if (nextGroup < groups.length) {
         setGroupIdx(nextGroup);
         setCardIdx(0);
-        setCardState('idle');
-        setInputVal('');
         saveProgress(nextGroup, 0, completedGroups);
       } else {
         update({ [phaseKey]: { ...phaseState, completed: true, completedGroups } });
@@ -90,39 +86,37 @@ export default function FlashcardPhase({ phaseKey, direction }: Props) {
     }
   }, [cardIdx, totalCards, groupIdx, groups.length, phaseState, saveProgress, update, phaseKey, navigate]);
 
-  const submitAnswer = useCallback(() => {
-    if (cardState !== 'idle' || !inputVal.trim()) return;
+  // Called ONLY from input onKeyDown or the ✓ button — never from the window handler
+  const submitAnswer = () => {
+    if (cardStateRef.current !== 'idle' || !inputValRef.current.trim()) return;
     const correct = isFormula
-      ? checkFormula(inputVal, correctAnswer!)
-      : checkName(inputVal, correctAnswer!);
+      ? checkFormula(inputValRef.current, correctAnswer!)
+      : checkName(inputValRef.current, correctAnswer!);
     setCardState(correct ? 'correct' : 'wrong');
     if (correct) {
       timerRef.current = setTimeout(advance, 800);
     }
-  }, [cardState, inputVal, isFormula, correctAnswer, advance]);
+  };
 
-  // Keyboard: Enter submits when idle; Enter or → advances when wrong
-  // Use cardState + submitAnswer + advance in deps so closure is always fresh
+  // Global handler: Escape only + arrow/Enter to advance after wrong.
+  // Deliberately does NOT call submitAnswer — the input's onKeyDown does that.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') { navigate('/'); return; }
-      if (e.key === 'Enter') {
-        if (cardState === 'idle') submitAnswer();
-        else if (cardState === 'wrong') advance();
+      if (cardStateRef.current === 'wrong' &&
+          (e.key === 'Enter' || e.key === 'ArrowRight')) {
+        advance();
       }
-      if (e.key === 'ArrowRight' && cardState === 'wrong') advance();
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [cardState, submitAnswer, advance, navigate]); // ← proper deps, not empty/no-array
+  }, [advance, navigate]); // cardState read via ref, so no dep needed
 
   const navigateToGroup = (gi: number) => {
     if (gi === groupIdx) return;
     if (!phaseState.completedGroups.includes(gi)) return;
     setGroupIdx(gi);
     setCardIdx(0);
-    setCardState('idle');
-    setInputVal('');
     saveProgress(gi, 0, phaseState.completedGroups);
   };
 
@@ -137,6 +131,10 @@ export default function FlashcardPhase({ phaseKey, direction }: Props) {
     cardState === 'idle'    ? 'border-gray-300' :
     cardState === 'correct' ? 'border-green-500' :
                               'border-red-400';
+
+  const phaseTitle = isFormula
+    ? 'Phase 1 — Name → Formula'
+    : 'Phase 2 — Formula → Name';
 
   return (
     <Layout>
@@ -157,6 +155,7 @@ export default function FlashcardPhase({ phaseKey, direction }: Props) {
           return (
             <button
               key={gi}
+              type="button"
               onClick={() => navigateToGroup(gi)}
               disabled={!isDone && !isCurrent}
               className={`text-xs font-semibold px-3 py-1 rounded-full border transition-colors ${
@@ -194,9 +193,15 @@ export default function FlashcardPhase({ phaseKey, direction }: Props) {
               ref={inputRef}
               value={inputVal}
               onChange={e => setInputVal(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter' && cardState === 'idle') submitAnswer(); }}
+              onKeyDown={e => {
+                // ONLY this handler submits — global handler deliberately excluded
+                if (e.key === 'Enter') {
+                  e.stopPropagation();   // prevent the window handler from also seeing it
+                  submitAnswer();
+                }
+              }}
               disabled={cardState !== 'idle'}
-              placeholder={inputPlaceholder}
+              placeholder={isFormula ? 'Type formula…' : 'Type name…'}
               className="flex-1 px-4 py-3 text-base bg-transparent outline-none text-slate-800 placeholder-gray-400 text-center"
               spellCheck={false}
               autoComplete="off"
@@ -204,6 +209,7 @@ export default function FlashcardPhase({ phaseKey, direction }: Props) {
             />
             {cardState === 'idle' && (
               <button
+                type="button"
                 onClick={submitAnswer}
                 disabled={!inputVal.trim()}
                 className="px-4 bg-blue-600 text-white font-bold hover:bg-blue-700 disabled:opacity-40 transition-colors"
@@ -223,6 +229,7 @@ export default function FlashcardPhase({ phaseKey, direction }: Props) {
                 Answer: <strong className="text-slate-800">{correctAnswer}</strong>
               </div>
               <button
+                type="button"
                 onClick={advance}
                 className="w-full py-2.5 bg-slate-700 text-white font-semibold rounded-lg hover:bg-slate-800 text-sm transition-colors"
               >
