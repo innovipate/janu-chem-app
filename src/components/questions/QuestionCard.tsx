@@ -2,7 +2,6 @@ import { useState, useEffect, useRef } from 'react';
 import type { Question, Answer } from '../../types';
 import { checkFormula, checkName } from '../../utils/normalize';
 import ListingQuestion from './ListingQuestion';
-import FormulaInput from '../FormulaInput';
 
 interface Props {
   question: Question;
@@ -81,6 +80,7 @@ export default function QuestionCard({ question, onAnswered, onNext, questionNum
   };
 
   const { type, prompt, options, correctAnswer } = question;
+  const isText = type === 'name-to-formula' || type === 'formula-to-name';
   const isCharge = type === 'charge-select' || type === 'fill-charge';
   const isTF = type === 'true-false-charge' || type === 'true-false-formula';
   const isOxygen = type === 'oxygen-count';
@@ -102,31 +102,8 @@ export default function QuestionCard({ question, onAnswered, onNext, questionNum
       {/* Prompt */}
       <p className="text-lg font-semibold text-slate-800 leading-snug">{prompt}</p>
 
-      {/* ── Name → Formula (FormulaInput with live preview) ────────────────── */}
-      {type === 'name-to-formula' && (
-        <div className="space-y-2">
-          <FormulaInput
-            value={input}
-            onChange={setInput}
-            onSubmit={() => submitted ? onNext() : submitText()}
-            disabled={submitted}
-            feedback={!submitted ? null : isCorrect ? 'correct' : 'wrong'}
-            autoFocus
-          />
-          {submitted && !isCorrect && (
-            <div className="flex items-start gap-2 text-sm bg-red-50 border border-red-200 rounded-lg px-3 py-2">
-              <span className="text-red-500 mt-0.5">✗</span>
-              <span className="text-gray-700">Correct: <strong className="text-slate-800 font-mono">{correctAnswer as string}</strong></span>
-            </div>
-          )}
-          {submitted && isCorrect && (
-            <p className="text-sm text-green-700 flex items-center gap-1">✓ Correct!</p>
-          )}
-        </div>
-      )}
-
-      {/* ── Formula → Name (plain text input) ──────────────────────────────── */}
-      {type === 'formula-to-name' && (
+      {/* ── Text input ─────────────────────────────────────────────────────── */}
+      {isText && (
         <div className="space-y-3">
           <div className={`flex rounded-lg border-2 overflow-hidden transition-colors ${inputContainerClass()}`}>
             <input
@@ -135,7 +112,7 @@ export default function QuestionCard({ question, onAnswered, onNext, questionNum
               onChange={e => setInput(e.target.value)}
               onKeyDown={e => e.key === 'Enter' && (submitted ? onNext() : submitText())}
               disabled={submitted}
-              placeholder="Type name…"
+              placeholder={type === 'name-to-formula' ? 'Type formula…' : 'Type name…'}
               className="flex-1 px-4 py-3 text-base bg-transparent outline-none text-slate-800 placeholder-gray-400"
             />
             {!submitted && (
@@ -151,11 +128,13 @@ export default function QuestionCard({ question, onAnswered, onNext, questionNum
           {submitted && !isCorrect && (
             <div className="flex items-start gap-2 text-sm bg-red-50 border border-red-200 rounded-lg px-3 py-2">
               <span className="text-red-500 mt-0.5">✗</span>
-              <span className="text-gray-700">Correct: <strong className="text-slate-800">{correctAnswer as string}</strong></span>
+              <span className="text-gray-700">Correct answer: <strong className="text-slate-800">{correctAnswer as string}</strong></span>
             </div>
           )}
           {submitted && isCorrect && (
-            <p className="text-sm text-green-700 flex items-center gap-1">✓ Correct!</p>
+            <p className="text-sm text-green-700 flex items-center gap-1">
+              <span>✓</span> Correct!
+            </p>
           )}
         </div>
       )}
